@@ -30,7 +30,7 @@ PDF 预览是当前项目独立实现的纯托管常见子集解析器：它不�
 从你的 NuGet 源安装：
 
 ```xml
-<PackageReference Include="OfficeViewer.Avalonia" Version="0.1.0" />
+<PackageReference Include="OfficeViewer.Avalonia" Version="0.1.1" />
 ```
 
 本仓库本地构建后的包目录如下，可在 Visual Studio、Rider 或 `NuGet.Config` 中添加为本地源：
@@ -122,6 +122,8 @@ public sealed class OfficePreviewViewModel : INotifyPropertyChanged
 
 `Document`、`PageCount`、`SheetCount` 是 Avalonia StyledProperty。请在 ViewModel 中将文档字节数组绑定到 `Document`；需要释放内存时也将绑定源设为 `null`，使控件和 ViewModel 都不再保留该字节数组。
 
+可在代码中调用 `LoadAsync(Stream)` 读取流。控件不会关闭调用方传入的流，而会创建自己的字节快照并将其赋给 `Document`；MVVM 绑定仍建议使用 `byte[]? Document`。
+
 ### NativeAOT
 
 本包支持 NativeAOT。
@@ -154,6 +156,17 @@ The PDF viewer is this project's separate managed common-subset implementation. 
 | Excel / XLSX | `OfficeViewer.Avalonia.Xlsx.XlsxViewer` | `SheetCount`, `SelectedSheetIndex` |
 | PDF | `OfficeViewer.Avalonia.Pdf.PdfViewer` | `PageCount` |
 
+### 预览截图 / Screenshots
+
+以下截图来自 samples 目录中的实际控件运行效果。 / The following screenshots show the viewers running with the sample documents in the `samples` directory.
+
+| 格式 / Format | 预览 / Preview |
+| --- | --- |
+| Word / DOCX | ![DOCX preview](https://github.com/fvffv/OfficeViewer.Avalonia/blob/main/samples/word.png?raw=true) |
+| PowerPoint / PPTX | ![PPTX preview](https://github.com/fvffv/OfficeViewer.Avalonia/blob/main/samples/pptx.png?raw=true) |
+| Excel / XLSX | ![XLSX preview](https://github.com/fvffv/OfficeViewer.Avalonia/blob/main/samples/xlsx.png?raw=true) |
+| PDF | ![PDF preview](https://github.com/fvffv/OfficeViewer.Avalonia/blob/main/samples/pdf.png?raw=true) |
+
 Every viewer exposes a bindable `byte[]? Document` property. Assign a new document byte array to start loading automatically; clear it or assign `null` to cancel stale loading and release the current document model, images, and visual resources. PPTX and PDF only materialize visible pages/slides plus a small adjacent buffer. `LoadAsync` remains available as a convenience method for non-binding scenarios.
 
 ### Install
@@ -161,7 +174,7 @@ Every viewer exposes a bindable `byte[]? Document` property. Assign a new docume
 Install from your NuGet source:
 
 ```xml
-<PackageReference Include="OfficeViewer.Avalonia" Version="0.1.0" />
+<PackageReference Include="OfficeViewer.Avalonia" Version="0.1.1" />
 ```
 
 For a local build of this repository, add the following folder as a NuGet source:
@@ -252,6 +265,8 @@ public sealed class OfficePreviewViewModel : INotifyPropertyChanged
 ```
 
 `Document`, `PageCount`, and `SheetCount` are Avalonia styled properties. Bind the document byte array from a view model to `Document`; set that binding source to `null` when releasing memory so neither the viewer nor the view model retains the bytes.
+
+For code-behind or service code, `LoadAsync(Stream)` accepts a stream without taking ownership of it. The viewer creates its own byte snapshot and assigns it to `Document`; `byte[]? Document` remains the recommended MVVM binding API.
 
 ### NativeAOT
 

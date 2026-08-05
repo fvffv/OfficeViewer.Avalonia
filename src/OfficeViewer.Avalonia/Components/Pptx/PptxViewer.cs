@@ -111,6 +111,14 @@ public sealed class PptxViewer : UserControl, IDisposable
         return _documentLoadTask = LoadDocumentAsync(document, cancellationToken);
     }
 
+    /// <summary>Loads a PPTX stream without taking ownership of the supplied stream.</summary>
+    public async Task LoadAsync(Stream source, CancellationToken cancellationToken = default)
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        var document = await global::OfficeViewer.Avalonia.DocumentData.ReadAsync(source, cancellationToken).ConfigureAwait(false);
+        await LoadAsync(document, cancellationToken).ConfigureAwait(false);
+    }
+
     private async Task LoadDocumentAsync(byte[] document, CancellationToken cancellationToken)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);

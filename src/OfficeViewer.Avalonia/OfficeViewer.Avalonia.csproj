@@ -11,13 +11,16 @@
     <IsAotCompatible>true</IsAotCompatible>
 
     <PackageId>OfficeViewer.Avalonia</PackageId>
-    <Version>0.1.0</Version>
+    <Version>0.1.1</Version>
     <Authors>OfficeViewer.Avalonia</Authors>
-    <Description>Avalonia 原生 DOCX、PPTX、XLSX 与常见 PDF 预览控件。Native Avalonia viewers for DOCX, PPTX, XLSX, and a common PDF subset, with continuous scrolling, bounded image lifetime, and NativeAOT-compatible managed parsing.</Description>
+    <Description>OfficeViewer.Avalonia 提供支持字节绑定的 Avalonia 原生 DOCX、PPTX、XLSX 与常见 PDF 连续预览控件，支持自动释放文档资源和 NativeAOT；DOCX、PPTX、XLSX 的读取与布局设计参考 vue-office-core。OfficeViewer.Avalonia provides native Avalonia viewers for DOCX, PPTX, XLSX, and a common PDF subset with bindable document bytes, continuous scrolling, automatic resource release, and NativeAOT support; DOCX, PPTX, and XLSX reading and layout design are informed by vue-office-core.</Description>
     <PackageTags>Avalonia;Office;DOCX;PPTX;XLSX;PDF;NativeAOT;preview</PackageTags>
     <PackageReadmeFile>README.md</PackageReadmeFile>
+    <PackageLicenseExpression>MIT</PackageLicenseExpression>
     <PackageReleaseNotes>首个独立版本：DOCX、PPTX、XLSX 与托管 PDF 预览控件。Initial standalone package: DOCX, PPTX, XLSX, and managed PDF viewers.</PackageReleaseNotes>
     <RepositoryType>git</RepositoryType>
+    <RepositoryUrl>https://github.com/fvffv/OfficeViewer.Avalonia</RepositoryUrl>
+    <PackageProjectUrl>https://github.com/fvffv/OfficeViewer.Avalonia</PackageProjectUrl>
     <IncludeSymbols>true</IncludeSymbols>
     <SymbolPackageFormat>snupkg</SymbolPackageFormat>
   </PropertyGroup>

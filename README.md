@@ -25,6 +25,10 @@ PDF 预览是当前项目独立实现的纯托管常见子集解析器：它不�
 
 每个控件均提供可绑定的 `byte[]? Document` 属性。给 `Document` 赋新的文件字节数组会自动开始读取；将其清除或设为 `null` 会自动取消旧读取任务，并释放当前文档的模型、图像与可视资源。PPTX/PDF 仅会实例化可视页及少量相邻页，避免长文档持续占用图片内存。控件仍保留 `LoadAsync` 作为非绑定场景的便捷方法。
 
+### 缩放
+
+**所有四个预览控件均支持按住 `Ctrl` 并滚动鼠标滚轮进行放大或缩小。** 不按 `Ctrl` 时，鼠标滚轮保持正常的上下滚动行为。
+
 ### 安装
 
 从你的 NuGet 源安装：
@@ -168,6 +172,10 @@ The PDF viewer is this project's separate managed common-subset implementation. 
 | PDF | ![PDF preview](https://github.com/fvffv/OfficeViewer.Avalonia/blob/main/samples/pdf.png?raw=true) |
 
 Every viewer exposes a bindable `byte[]? Document` property. Assign a new document byte array to start loading automatically; clear it or assign `null` to cancel stale loading and release the current document model, images, and visual resources. PPTX and PDF only materialize visible pages/slides plus a small adjacent buffer. `LoadAsync` remains available as a convenience method for non-binding scenarios.
+
+### Zoom
+
+**All four viewers support zooming with `Ctrl` + mouse wheel.** Without `Ctrl`, the mouse wheel continues to scroll the preview normally.
 
 ### Install
 

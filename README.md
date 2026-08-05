@@ -27,7 +27,7 @@ PDF 预览是当前项目独立实现的纯托管常见子集解析器：它不�
 
 ### 缩放
 
-**所有四个预览控件均支持按住 `Ctrl` 并滚动鼠标滚轮进行放大或缩小。** 不按 `Ctrl` 时，鼠标滚轮保持正常的上下滚动行为。
+**所有四个预览控件均支持按住 `Ctrl` 并滚动鼠标滚轮进行放大或缩小。** 
 
 ### 安装
 
@@ -175,7 +175,7 @@ Every viewer exposes a bindable `byte[]? Document` property. Assign a new docume
 
 ### Zoom
 
-**All four viewers support zooming with `Ctrl` + mouse wheel.** Without `Ctrl`, the mouse wheel continues to scroll the preview normally.
+**All four viewers support zooming with `Ctrl` + mouse wheel.** 
 
 ### Install
 

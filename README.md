@@ -154,6 +154,17 @@ The PDF viewer is this project's separate managed common-subset implementation. 
 | Excel / XLSX | `OfficeViewer.Avalonia.Xlsx.XlsxViewer` | `SheetCount`, `SelectedSheetIndex` |
 | PDF | `OfficeViewer.Avalonia.Pdf.PdfViewer` | `PageCount` |
 
+### 预览截图 / Screenshots
+
+以下截图来自 samples 目录中的实际控件运行效果。 / The following screenshots show the viewers running with the sample documents in the `samples` directory.
+
+| 格式 / Format | 预览 / Preview |
+| --- | --- |
+| Word / DOCX | ![DOCX preview](https://github.com/fvffv/OfficeViewer.Avalonia/blob/main/samples/word.png?raw=true) |
+| PowerPoint / PPTX | ![PPTX preview](https://github.com/fvffv/OfficeViewer.Avalonia/blob/main/samples/pptx.png?raw=true) |
+| Excel / XLSX | ![XLSX preview](https://github.com/fvffv/OfficeViewer.Avalonia/blob/main/samples/xlsx.png?raw=true) |
+| PDF | ![PDF preview](https://github.com/fvffv/OfficeViewer.Avalonia/blob/main/samples/pdf.png?raw=true) |
+
 Every viewer exposes a bindable `byte[]? Document` property. Assign a new document byte array to start loading automatically; clear it or assign `null` to cancel stale loading and release the current document model, images, and visual resources. PPTX and PDF only materialize visible pages/slides plus a small adjacent buffer. `LoadAsync` remains available as a convenience method for non-binding scenarios.
 
 ### Install

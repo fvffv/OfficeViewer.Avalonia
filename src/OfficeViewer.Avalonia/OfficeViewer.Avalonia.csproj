@@ -1,0 +1,32 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFrameworks>net8.0;net10.0</TargetFrameworks>
+    <LangVersion>latest</LangVersion>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <AssemblyName>OfficeViewer.Avalonia</AssemblyName>
+    <RootNamespace>OfficeViewer.Avalonia</RootNamespace>
+    <IsPackable>true</IsPackable>
+    <IsTrimmable>true</IsTrimmable>
+    <IsAotCompatible>true</IsAotCompatible>
+
+    <PackageId>OfficeViewer.Avalonia</PackageId>
+    <Version>0.1.0</Version>
+    <Authors>OfficeViewer.Avalonia</Authors>
+    <Description>Avalonia 原生 DOCX、PPTX、XLSX 与常见 PDF 预览控件。Native Avalonia viewers for DOCX, PPTX, XLSX, and a common PDF subset, with continuous scrolling, bounded image lifetime, and NativeAOT-compatible managed parsing.</Description>
+    <PackageTags>Avalonia;Office;DOCX;PPTX;XLSX;PDF;NativeAOT;preview</PackageTags>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+    <PackageReleaseNotes>首个独立版本：DOCX、PPTX、XLSX 与托管 PDF 预览控件。Initial standalone package: DOCX, PPTX, XLSX, and managed PDF viewers.</PackageReleaseNotes>
+    <RepositoryType>git</RepositoryType>
+    <IncludeSymbols>true</IncludeSymbols>
+    <SymbolPackageFormat>snupkg</SymbolPackageFormat>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Avalonia" Version="12.0.2" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <None Include="..\..\README.md" Pack="true" PackagePath="\" />
+  </ItemGroup>
+</Project>

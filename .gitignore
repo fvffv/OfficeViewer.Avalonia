@@ -1,0 +1,4 @@
+artifacts/packages/*.nupkg
+artifacts/packages/*.snupkg
+**/bin/
+**/obj/

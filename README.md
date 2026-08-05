@@ -30,7 +30,7 @@ PDF 预览是当前项目独立实现的纯托管常见子集解析器：它不�
 从你的 NuGet 源安装：
 
 ```xml
-<PackageReference Include="OfficeViewer.Avalonia" Version="0.1.0" />
+<PackageReference Include="OfficeViewer.Avalonia" Version="0.1.1" />
 ```
 
 本仓库本地构建后的包目录如下，可在 Visual Studio、Rider 或 `NuGet.Config` 中添加为本地源：
@@ -172,7 +172,7 @@ Every viewer exposes a bindable `byte[]? Document` property. Assign a new docume
 Install from your NuGet source:
 
 ```xml
-<PackageReference Include="OfficeViewer.Avalonia" Version="0.1.0" />
+<PackageReference Include="OfficeViewer.Avalonia" Version="0.1.1" />
 ```
 
 For a local build of this repository, add the following folder as a NuGet source:

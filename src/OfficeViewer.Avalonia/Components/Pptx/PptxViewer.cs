@@ -197,13 +197,14 @@ public sealed class PptxViewer : UserControl, IDisposable
         _document = document;
         for (var index = 0; index < document.Slides.Count; index++)
         {
-            // This is only a transparent, fixed-size layout reservation.  Its visual
-            // canvas is materialized lazily so a 100-slide deck does not decode all
-            // media merely because it is opened.
+            // This fixed-size layout reservation stays white while its visual canvas
+            // is materialized lazily, so slides without an explicit background do
+            // not become transparent and a 100-slide deck still avoids eager media decoding.
             var slot = new Border
             {
                 Width = document.Width,
                 Height = document.Height,
+                Background = Brushes.White,
                 ClipToBounds = true
             };
             _slideHosts[index] = new SlideHost(slot);
@@ -242,7 +243,7 @@ public sealed class PptxViewer : UserControl, IDisposable
             Width = _document.Width,
             Height = _document.Height,
             ClipToBounds = true,
-            Background = ToBrush(_document.Slides[index].Background)
+            Background = ToBrush(_document.Slides[index].Background) ?? Brushes.White
         };
         var bitmaps = new List<IDisposable>();
         _renderingBitmaps = bitmaps;

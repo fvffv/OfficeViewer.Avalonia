@@ -16,6 +16,12 @@ internal sealed class DocxDocumentModel
     public DocxNumbering Numbering { get; set; } = new();
 }
 
+internal sealed class DocxPageModel
+{
+    public List<DocxBlock> Blocks { get; } = [];
+    public Dictionary<(string NumberingId, int Level), int> InitialCounters { get; init; } = [];
+}
+
 internal abstract class DocxBlock;
 
 internal sealed class DocxParagraph : DocxBlock

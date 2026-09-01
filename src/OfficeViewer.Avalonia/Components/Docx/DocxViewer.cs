@@ -26,11 +26,19 @@ public sealed class DocxViewer : UserControl, IDisposable
     private readonly StackPanel _pages;
     private readonly LayoutTransformControl _zoomHost;
     private readonly ScaleTransform _zoomTransform = new();
-    private readonly List<IDisposable> _ownedImages = [];
+    private readonly Dictionary<int, PageHost> _pageHosts = [];
+    private readonly Dictionary<int, List<IDisposable>> _ownedPageImages = [];
+    private readonly HashSet<int> _pendingPages = [];
+    private readonly Dictionary<int, Point> _touchPoints = [];
     private CancellationTokenSource? _loadCancellation;
     private Task? _documentLoadTask;
+    private DocxDocumentModel? _document;
     private long _generation;
     private double _zoom = 1;
+    private double _pinchStartDistance;
+    private double _pinchStartZoom;
+    private List<IDisposable>? _renderingImages;
+    private Dictionary<string, Bitmap?>? _predecodedImages;
     private bool _settingDocument;
     private bool _disposed;
 
@@ -83,6 +91,11 @@ public sealed class DocxViewer : UserControl, IDisposable
         // Listen during the tunnel phase. ScrollViewer consumes wheel events during bubbling,
         // which made Ctrl+wheel depend on the pointer's exact child control.
         AddHandler(InputElement.PointerWheelChangedEvent, OnPointerWheelChanged, RoutingStrategies.Tunnel);
+        AddHandler(InputElement.PointerPressedEvent, OnPointerPressed, RoutingStrategies.Tunnel);
+        AddHandler(InputElement.PointerMovedEvent, OnPointerMoved, RoutingStrategies.Tunnel);
+        AddHandler(InputElement.PointerReleasedEvent, OnPointerReleased, RoutingStrategies.Tunnel);
+        AddHandler(InputElement.PointerCaptureLostEvent, OnPointerCaptureLost, RoutingStrategies.Tunnel);
+        _scrollViewer.ScrollChanged += OnScrollChanged;
         Content = _scrollViewer;
     }
 
@@ -126,12 +139,16 @@ public sealed class DocxViewer : UserControl, IDisposable
         });
         try
         {
-            var parsed = await Task.Run(() => new DocxParser().Parse(new MemoryStream(document, writable: false)), requestCancellation.Token).ConfigureAwait(false);
+            var parsed = await Task.Run(() =>
+            {
+                var model = new DocxParser().Parse(new MemoryStream(document, writable: false));
+                return (Model: model, Pages: PreparePages(model));
+            }, requestCancellation.Token).ConfigureAwait(false);
             requestCancellation.Token.ThrowIfCancellationRequested();
             if (generation != Volatile.Read(ref _generation)) return;
             await Dispatcher.UIThread.InvokeAsync(() =>
             {
-                if (generation == Volatile.Read(ref _generation)) Render(parsed);
+                if (generation == Volatile.Read(ref _generation)) Render(parsed.Model, parsed.Pages);
             });
         }
         catch (OperationCanceledException) when (requestCancellation.IsCancellationRequested)
@@ -185,26 +202,58 @@ public sealed class DocxViewer : UserControl, IDisposable
 
     private void Render(DocxDocumentModel document)
     {
-        ClearVisuals();
-        var counters = new Dictionary<(string NumberingId, int Level), int>();
-        var page = CreatePage(document);
-        _pages.Children.Add(page.Border);
-
-        foreach (var block in document.Blocks)
-        {
-            page.ChildPanel.Children.Add(RenderBlock(block, document, counters));
-            if (block is DocxParagraph { Inlines: var inlines } && inlines.OfType<DocxBreak>().Any(x => x.IsPageBreak))
-            {
-                page = CreatePage(document);
-                _pages.Children.Add(page.Border);
-            }
-        }
-        PageCount = _pages.Children.Count;
+        Render(document, PreparePages(document));
     }
 
-    private PageHost CreatePage(DocxDocumentModel document)
+    private void Render(DocxDocumentModel document, List<DocxPageModel> pageModels)
     {
-        var childPanel = new StackPanel { Spacing = 0 };
+        ClearVisuals();
+        _document = document;
+        for (var index = 0; index < pageModels.Count; index++)
+        {
+            var page = CreatePage(document, pageModels[index]);
+            _pageHosts[index] = page;
+            _pages.Children.Add(page.Border);
+        }
+        PageCount = pageModels.Count;
+        _scrollViewer.Offset = default;
+        UpdateVirtualizedPages();
+    }
+
+    private static List<DocxPageModel> PreparePages(DocxDocumentModel document)
+    {
+        var pages = new List<DocxPageModel>();
+        var counters = new Dictionary<(string NumberingId, int Level), int>();
+        var page = new DocxPageModel { InitialCounters = new Dictionary<(string NumberingId, int Level), int>(counters) };
+        foreach (var block in document.Blocks)
+        {
+            page.Blocks.Add(block);
+            AdvanceNumbering(block, document.Numbering, counters);
+            if (block is DocxParagraph { Inlines: var inlines } && inlines.OfType<DocxBreak>().Any(x => x.IsPageBreak))
+            {
+                pages.Add(page);
+                page = new DocxPageModel { InitialCounters = new Dictionary<(string NumberingId, int Level), int>(counters) };
+            }
+        }
+        if (page.Blocks.Count > 0 || pages.Count == 0) pages.Add(page);
+        return pages;
+    }
+
+    private static void AdvanceNumbering(DocxBlock block, DocxNumbering numbering, Dictionary<(string NumberingId, int Level), int> counters)
+    {
+        if (block is DocxParagraph paragraph)
+        {
+            _ = GetListPrefix(paragraph, numbering, counters, out _);
+            return;
+        }
+        if (block is DocxTable table)
+            foreach (var cell in table.Rows)
+                foreach (var item in cell.SelectMany(x => x.Blocks))
+                    AdvanceNumbering(item, numbering, counters);
+    }
+
+    private PageHost CreatePage(DocxDocumentModel document, DocxPageModel model)
+    {
         var page = new Border
         {
             Width = document.PageWidth,
@@ -214,9 +263,147 @@ public sealed class DocxViewer : UserControl, IDisposable
             BorderBrush = Brush.Parse("#D0D5DB"),
             BorderThickness = new Thickness(1),
             BoxShadow = new BoxShadows(new BoxShadow { Blur = 10, OffsetX = 0, OffsetY = 2, Color = Color.FromArgb(48, 0, 0, 0) }),
-            Child = childPanel
+            Child = null
         };
-        return new PageHost(page, childPanel);
+        return new PageHost(page, model);
+    }
+
+    private void OnScrollChanged(object? sender, ScrollChangedEventArgs e) => UpdateVirtualizedPages();
+
+    private void UpdateVirtualizedPages()
+    {
+        if (_document is null || _pageHosts.Count == 0) return;
+        var offset = _scrollViewer.Offset.Y / _zoom;
+        var viewport = Math.Max(1, _scrollViewer.Viewport.Height / _zoom);
+        var footprint = _document.PageHeight + _pages.Spacing;
+        var firstVisible = Math.Clamp((int)Math.Floor((offset - _pages.Margin.Top) / Math.Max(1, footprint)), 0, _pageHosts.Count - 1);
+        var visibleCount = Math.Max(1, (int)Math.Ceiling(viewport / Math.Max(1, footprint)) + 1);
+        var firstKept = Math.Max(0, firstVisible - 1);
+        var lastKept = Math.Min(_pageHosts.Count - 1, firstVisible + visibleCount);
+        foreach (var index in _pageHosts.Keys.ToArray())
+        {
+            if (index >= firstKept && index <= lastKept) ScheduleMaterializePage(index);
+            else ReleasePage(index);
+        }
+    }
+
+    private void ScheduleMaterializePage(int index)
+    {
+        if (!_pageHosts.TryGetValue(index, out var host) || host.ChildPanel is not null || host.Materializing || !_pendingPages.Add(index)) return;
+        host.Materializing = true;
+        var generation = Volatile.Read(ref _generation);
+        Dispatcher.UIThread.Post(() =>
+        {
+            _pendingPages.Remove(index);
+            if (generation != Volatile.Read(ref _generation))
+            {
+                if (_pageHosts.TryGetValue(index, out var staleHost)) staleHost.Materializing = false;
+                return;
+            }
+            _ = MaterializePageAsync(index, generation);
+        }, DispatcherPriority.Background);
+    }
+
+    private async Task MaterializePageAsync(int index, long generation)
+    {
+        var document = _document;
+        if (document is null || generation != Volatile.Read(ref _generation) || !_pageHosts.TryGetValue(index, out var host) || host.ChildPanel is not null)
+        {
+            if (_pageHosts.TryGetValue(index, out var staleHost)) staleHost.Materializing = false;
+            return;
+        }
+
+        var relationshipIds = host.Model.Blocks
+            .SelectMany(EnumeratePictures)
+            .Select(picture => picture.RelationshipId)
+            .Distinct(StringComparer.Ordinal)
+            .ToArray();
+        var decoded = await Task.WhenAll(relationshipIds.Select(async relationshipId =>
+        {
+            if (!document.Images.TryGetValue(relationshipId, out var bytes)) return (relationshipId, Bitmap: (Bitmap?)null);
+            return (relationshipId, Bitmap: await Task.Run(() => DecodeBitmap(bytes)).ConfigureAwait(false));
+        })).ConfigureAwait(true);
+
+        if (generation != Volatile.Read(ref _generation) || _document != document || !_pageHosts.TryGetValue(index, out host) || host.ChildPanel is not null)
+        {
+            foreach (var item in decoded) item.Bitmap?.Dispose();
+            if (_pageHosts.TryGetValue(index, out var releasedHost)) releasedHost.Materializing = false;
+            return;
+        }
+
+        var childPanel = new StackPanel { Spacing = 0 };
+        var images = new List<IDisposable>();
+        _predecodedImages = decoded.ToDictionary(item => item.relationshipId, item => item.Bitmap, StringComparer.Ordinal);
+        foreach (var bitmap in _predecodedImages.Values)
+            if (bitmap is not null) images.Add(bitmap);
+        _renderingImages = images;
+        try
+        {
+            var counters = new Dictionary<(string NumberingId, int Level), int>(host.Model.InitialCounters);
+            foreach (var block in host.Model.Blocks)
+            {
+                try
+                {
+                    childPanel.Children.Add(RenderBlock(block, document, counters));
+                }
+                catch (Exception error)
+                {
+                    // A malformed font, unsupported drawing, or damaged image in one
+                    // paragraph must not tear down the UI dispatcher or the whole file.
+                    childPanel.Children.Add(new TextBlock
+                    {
+                        Text = $"[此段无法渲染：{error.Message}]",
+                        Foreground = Brushes.DarkRed,
+                        TextWrapping = TextWrapping.Wrap
+                    });
+                }
+            }
+        }
+        catch (Exception error)
+        {
+            foreach (var image in images) image.Dispose();
+            childPanel.Children.Clear();
+            childPanel.Children.Add(new TextBlock
+            {
+                Text = $"[此页无法渲染：{error.Message}]",
+                Foreground = Brushes.DarkRed,
+                TextWrapping = TextWrapping.Wrap,
+                Margin = new Thickness(12)
+            });
+        }
+        finally
+        {
+            _renderingImages = null;
+            _predecodedImages = null;
+        }
+        host.ChildPanel = childPanel;
+        host.Border.Child = childPanel;
+        _ownedPageImages[index] = images;
+        host.Materializing = false;
+    }
+
+    private static IEnumerable<DocxPicture> EnumeratePictures(DocxBlock block)
+    {
+        if (block is DocxParagraph paragraph)
+        {
+            foreach (var picture in paragraph.Inlines.OfType<DocxPicture>()) yield return picture;
+            yield break;
+        }
+        if (block is DocxTable table)
+            foreach (var picture in table.Rows.SelectMany(row => row).SelectMany(cell => cell.Blocks).SelectMany(EnumeratePictures))
+                yield return picture;
+    }
+
+    private void ReleasePage(int index)
+    {
+        _pendingPages.Remove(index);
+        if (!_pageHosts.TryGetValue(index, out var host)) return;
+        host.Materializing = false;
+        if (host.ChildPanel is null) return;
+        host.Border.Child = null;
+        host.ChildPanel = null;
+        if (_ownedPageImages.Remove(index, out var images))
+            foreach (var image in images) image.Dispose();
     }
 
     private Control RenderBlock(DocxBlock block, DocxDocumentModel document, Dictionary<(string NumberingId, int Level), int> counters) => block switch
@@ -428,6 +615,17 @@ public sealed class DocxViewer : UserControl, IDisposable
 
     private Image CreateImage(byte[] bytes, DocxPicture picture, double? requestedWidth = null)
     {
+        // Skia's native decoder may terminate the process for legacy WMF/EMF
+        // payloads on some platforms. The parser keeps those relationships so
+        // layout remains intact, but only pass formats with a stable bitmap
+        // signature to Avalonia's decoder.
+        if (_predecodedImages is not null)
+        {
+            _predecodedImages.TryGetValue(picture.RelationshipId, out var decoded);
+            return CreateImageControl(decoded, picture, requestedWidth);
+        }
+        if (!IsSafeBitmap(bytes))
+            return new Image { Width = Math.Max(1, picture.Width), Height = Math.Max(1, picture.Height) };
         var sourceWidth = Math.Max(1, picture.Width);
         var sourceHeight = Math.Max(1, picture.Height);
         var width = requestedWidth is > 0 ? requestedWidth.Value : sourceWidth;
@@ -436,7 +634,7 @@ public sealed class DocxViewer : UserControl, IDisposable
         var decodeWidth = Math.Clamp((int)Math.Ceiling(width), 1, 1024);
         using var stream = new MemoryStream(bytes, writable: false);
         var bitmap = Bitmap.DecodeToWidth(stream, decodeWidth, BitmapInterpolationMode.HighQuality);
-        _ownedImages.Add(bitmap);
+        _renderingImages?.Add(bitmap);
         return new Image
         {
             Source = bitmap,
@@ -444,6 +642,41 @@ public sealed class DocxViewer : UserControl, IDisposable
             Height = sourceHeight * width / sourceWidth,
             Stretch = Stretch.Uniform
         };
+    }
+
+    private static Image CreateImageControl(Bitmap? bitmap, DocxPicture picture, double? requestedWidth)
+    {
+        var sourceWidth = Math.Max(1, picture.Width);
+        var sourceHeight = Math.Max(1, picture.Height);
+        var width = requestedWidth is > 0 ? requestedWidth.Value : sourceWidth;
+        return new Image
+        {
+            Source = bitmap,
+            Width = width,
+            Height = sourceHeight * width / sourceWidth,
+            Stretch = Stretch.Uniform
+        };
+    }
+
+    private static Bitmap? DecodeBitmap(byte[] bytes)
+    {
+        if (!IsSafeBitmap(bytes)) return null;
+        try
+        {
+            using var stream = new MemoryStream(bytes, writable: false);
+            return Bitmap.DecodeToWidth(stream, 1024, BitmapInterpolationMode.HighQuality);
+        }
+        catch { return null; }
+    }
+
+    private static bool IsSafeBitmap(byte[] bytes)
+    {
+        if (bytes.Length >= 8 && bytes[0] == 0x89 && bytes[1] == 0x50 && bytes[2] == 0x4E && bytes[3] == 0x47 && bytes[4] == 0x0D && bytes[5] == 0x0A && bytes[6] == 0x1A && bytes[7] == 0x0A) return true;
+        if (bytes.Length >= 3 && bytes[0] == 0xFF && bytes[1] == 0xD8 && bytes[2] == 0xFF) return true;
+        if (bytes.Length >= 6 && bytes[0] == (byte)'G' && bytes[1] == (byte)'I' && bytes[2] == (byte)'F' && bytes[3] == (byte)'8') return true;
+        if (bytes.Length >= 2 && bytes[0] == (byte)'B' && bytes[1] == (byte)'M') return true;
+        if (bytes.Length >= 12 && bytes[0] == (byte)'R' && bytes[1] == (byte)'I' && bytes[2] == (byte)'F' && bytes[3] == (byte)'F' && bytes[8] == (byte)'W' && bytes[9] == (byte)'E' && bytes[10] == (byte)'B' && bytes[11] == (byte)'P') return true;
+        return false;
     }
 
     private static void ApplyTextBlockStyle(TextBlock target, DocxRunStyle style)
@@ -498,13 +731,66 @@ public sealed class DocxViewer : UserControl, IDisposable
     {
         if (!e.KeyModifiers.HasFlag(KeyModifiers.Control)) return;
         var factor = e.Delta.Y > 0 ? 1.1 : 1 / 1.1;
-        _zoom = Math.Clamp(_zoom * factor, .5, 2.5);
+        ApplyZoom(_zoom * factor);
+        e.Handled = true;
+    }
+
+    private void OnPointerPressed(object? sender, PointerEventArgs e)
+    {
+        if (e.Pointer.Type != PointerType.Touch) return;
+        _touchPoints[e.Pointer.Id] = e.GetPosition(this);
+        e.Pointer.Capture(this);
+        if (_touchPoints.Count == 2)
+        {
+            _pinchStartDistance = TouchDistance();
+            _pinchStartZoom = _zoom;
+            e.PreventGestureRecognition();
+            e.Handled = true;
+        }
+    }
+
+    private void OnPointerMoved(object? sender, PointerEventArgs e)
+    {
+        if (e.Pointer.Type != PointerType.Touch || !_touchPoints.ContainsKey(e.Pointer.Id)) return;
+        _touchPoints[e.Pointer.Id] = e.GetPosition(this);
+        if (_touchPoints.Count == 2 && _pinchStartDistance > 1)
+        {
+            ApplyZoom(_pinchStartZoom * TouchDistance() / _pinchStartDistance);
+            e.PreventGestureRecognition();
+            e.Handled = true;
+        }
+    }
+
+    private void OnPointerReleased(object? sender, PointerEventArgs e)
+    {
+        if (e.Pointer.Type != PointerType.Touch) return;
+        _touchPoints.Remove(e.Pointer.Id);
+        e.Pointer.Capture(null);
+        if (_touchPoints.Count < 2) _pinchStartDistance = 0;
+    }
+
+    private void OnPointerCaptureLost(object? sender, PointerCaptureLostEventArgs e)
+    {
+        _touchPoints.Clear();
+        _pinchStartDistance = 0;
+    }
+
+    private double TouchDistance()
+    {
+        if (_touchPoints.Count != 2) return 0;
+        var points = _touchPoints.Values.ToArray();
+        var dx = points[0].X - points[1].X;
+        var dy = points[0].Y - points[1].Y;
+        return Math.Sqrt(dx * dx + dy * dy);
+    }
+
+    private void ApplyZoom(double value)
+    {
+        _zoom = Math.Clamp(value, .5, 2.5);
         _zoomTransform.ScaleX = _zoom;
         _zoomTransform.ScaleY = _zoom;
-        // LayoutTransform changes the scrollable extent. Keeping an old horizontal offset
-        // leaves a shrunken page apparently stuck to the right side of the viewport.
         _scrollViewer.Offset = new Vector(0, _scrollViewer.Offset.Y);
-        e.Handled = true;
+        UpdateVirtualizedPages();
     }
 
     private static string FormatNumber(int value, string format) => format switch
@@ -547,9 +833,12 @@ public sealed class DocxViewer : UserControl, IDisposable
 
     private void ClearVisuals()
     {
+        _pendingPages.Clear();
+        foreach (var index in _pageHosts.Keys.ToArray()) ReleasePage(index);
+        _pageHosts.Clear();
+        _ownedPageImages.Clear();
         _pages.Children.Clear();
-        foreach (var image in _ownedImages) image.Dispose();
-        _ownedImages.Clear();
+        _document = null;
         PageCount = 0;
     }
 
@@ -562,5 +851,11 @@ public sealed class DocxViewer : UserControl, IDisposable
         Clear();
     }
 
-    private sealed record PageHost(Border Border, StackPanel ChildPanel);
+    private sealed class PageHost(Border border, DocxPageModel model)
+    {
+        public Border Border { get; } = border;
+        public DocxPageModel Model { get; } = model;
+        public StackPanel? ChildPanel { get; set; }
+        public bool Materializing { get; set; }
+    }
 }

@@ -33,12 +33,15 @@ public sealed class PptxViewer : UserControl, IDisposable
     private readonly ScaleTransform _zoomTransform = new();
     private readonly Dictionary<int, SlideHost> _slideHosts = [];
     private readonly Dictionary<int, List<IDisposable>> _ownedBitmaps = [];
+    private readonly HashSet<int> _pendingSlides = [];
+    private readonly Dictionary<int, Point> _touchPoints = [];
     private PptxDocumentModel? _document;
-    private List<IDisposable>? _renderingBitmaps;
     private CancellationTokenSource? _loadCancellation;
     private Task? _documentLoadTask;
     private long _generation;
     private double _zoom = 1;
+    private double _pinchStartDistance;
+    private double _pinchStartZoom;
     private bool _settingDocument;
     private bool _disposed;
 
@@ -91,6 +94,10 @@ public sealed class PptxViewer : UserControl, IDisposable
         };
         _scrollViewer.ScrollChanged += OnScrollChanged;
         AddHandler(InputElement.PointerWheelChangedEvent, OnPointerWheelChanged, RoutingStrategies.Tunnel);
+        AddHandler(InputElement.PointerPressedEvent, OnPointerPressed, RoutingStrategies.Tunnel);
+        AddHandler(InputElement.PointerMovedEvent, OnPointerMoved, RoutingStrategies.Tunnel);
+        AddHandler(InputElement.PointerReleasedEvent, OnPointerReleased, RoutingStrategies.Tunnel);
+        AddHandler(InputElement.PointerCaptureLostEvent, OnPointerCaptureLost, RoutingStrategies.Tunnel);
         Content = _scrollViewer;
     }
 
@@ -230,39 +237,92 @@ public sealed class PptxViewer : UserControl, IDisposable
 
         foreach (var index in _slideHosts.Keys.ToArray())
         {
-            if (index >= firstKept && index <= lastKept) MaterializeSlide(index);
+            if (index >= firstKept && index <= lastKept) ScheduleMaterializeSlide(index);
             else ReleaseSlide(index);
         }
     }
 
-    private void MaterializeSlide(int index)
+    private void ScheduleMaterializeSlide(int index)
     {
-        if (_document is null || !_slideHosts.TryGetValue(index, out var host) || host.Canvas is not null) return;
+        if (!_slideHosts.TryGetValue(index, out var host) || host.Canvas is not null || host.Materializing || !_pendingSlides.Add(index)) return;
+        host.Materializing = true;
+        var generation = Volatile.Read(ref _generation);
+        Dispatcher.UIThread.Post(() =>
+        {
+            _pendingSlides.Remove(index);
+            if (generation != Volatile.Read(ref _generation))
+            {
+                if (_slideHosts.TryGetValue(index, out var staleHost)) staleHost.Materializing = false;
+                return;
+            }
+            _ = MaterializeSlideAsync(index, generation);
+        }, DispatcherPriority.Background);
+    }
+
+    private async Task MaterializeSlideAsync(int index, long generation)
+    {
+        var document = _document;
+        if (document is null || generation != Volatile.Read(ref _generation) || !_slideHosts.TryGetValue(index, out var host) || host.Canvas is not null)
+        {
+            if (_slideHosts.TryGetValue(index, out var staleHost)) staleHost.Materializing = false;
+            return;
+        }
+        var slide = document.Slides[index];
         var canvas = new Canvas
         {
-            Width = _document.Width,
-            Height = _document.Height,
+            Width = document.Width,
+            Height = document.Height,
             ClipToBounds = true,
-            Background = ToBrush(_document.Slides[index].Background) ?? Brushes.White
+            Background = ToBrush(slide.Background) ?? Brushes.White
         };
         var bitmaps = new List<IDisposable>();
-        _renderingBitmaps = bitmaps;
         try
         {
-            foreach (var element in _document.Slides[index].Elements) AddElement(canvas, element);
+            var pictureTasks = new List<Task<(PptxPicture Picture, Bitmap? Bitmap)>>();
+            var elementCount = 0;
+            foreach (var element in slide.Elements)
+            {
+                if (element is PptxPicture picture)
+                    pictureTasks.Add(DecodePictureAsync(picture));
+                else
+                    AddElement(canvas, element);
+                if (++elementCount % 16 == 0)
+                    await global::Avalonia.Threading.Dispatcher.Yield(DispatcherPriority.Background);
+            }
+            var decodedPictures = await Task.WhenAll(pictureTasks).ConfigureAwait(true);
+            if (generation != Volatile.Read(ref _generation) || _document != document || !_slideHosts.TryGetValue(index, out host) || host.Canvas is not null)
+            {
+                foreach (var item in decodedPictures) item.Bitmap?.Dispose();
+                if (_slideHosts.TryGetValue(index, out var releasedHost)) releasedHost.Materializing = false;
+                return;
+            }
+            foreach (var item in decodedPictures)
+            {
+                if (item.Bitmap is null) continue;
+                bitmaps.Add(item.Bitmap);
+                AddDecodedPicture(canvas, item.Picture, item.Bitmap);
+            }
         }
-        finally
+        catch (Exception error)
         {
-            _renderingBitmaps = null;
+            foreach (var bitmap in bitmaps) bitmap.Dispose();
+            if (_document is not null && _slideHosts.TryGetValue(index, out host) && host.Canvas is null)
+                host.Slot.Child = new TextBlock { Text = $"无法渲染第 {index + 1} 页：{error.Message}", Foreground = Brushes.DarkRed, TextWrapping = TextWrapping.Wrap, Margin = new Thickness(12) };
+            if (_slideHosts.TryGetValue(index, out var failedHost)) failedHost.Materializing = false;
+            return;
         }
         host.Canvas = canvas;
         host.Slot.Child = canvas;
         _ownedBitmaps[index] = bitmaps;
+        host.Materializing = false;
     }
 
     private void ReleaseSlide(int index)
     {
-        if (!_slideHosts.TryGetValue(index, out var host) || host.Canvas is null) return;
+        _pendingSlides.Remove(index);
+        if (!_slideHosts.TryGetValue(index, out var host)) return;
+        host.Materializing = false;
+        if (host.Canvas is null) return;
         // Detach controls before disposing sources; this avoids a frame attempting to
         // paint a just-disposed Skia bitmap during a fast scroll.
         host.Slot.Child = null;
@@ -273,10 +333,10 @@ public sealed class PptxViewer : UserControl, IDisposable
 
     private void AddElement(Canvas canvas, PptxElement element)
     {
+        if (element is PptxPicture) return;
         Control? control = element switch
         {
             PptxShape shape => CreateShape(shape),
-            PptxPicture picture => CreatePicture(picture),
             PptxLine line => CreateLine(line),
             PptxChart chart => CreateChart(chart),
             _ => null
@@ -296,6 +356,49 @@ public sealed class PptxViewer : UserControl, IDisposable
         Canvas.SetLeft(control, element.Left);
         Canvas.SetTop(control, element.Top);
         canvas.Children.Add(control);
+    }
+
+    private async Task<(PptxPicture Picture, Bitmap? Bitmap)> DecodePictureAsync(PptxPicture picture)
+    {
+        var document = _document;
+        var bitmap = await Task.Run(() => DecodePicture(document, picture)).ConfigureAwait(false);
+        return (picture, bitmap);
+    }
+
+    private static Bitmap? DecodePicture(PptxDocumentModel? document, PptxPicture picture)
+    {
+        if (document is null) return null;
+        try
+        {
+            using var package = document.SourceBytes is { } sourceBytes
+                ? new ZipArchive(new MemoryStream(sourceBytes, writable: false), ZipArchiveMode.Read)
+                : ZipFile.OpenRead(document.SourcePath ?? throw new InvalidOperationException("The presentation source is unavailable."));
+            var entry = package.GetEntry(picture.PackagePath);
+            if (entry is null) return null;
+            using var compressed = entry.Open();
+            using var stream = new MemoryStream((int)Math.Min(entry.Length, int.MaxValue));
+            compressed.CopyTo(stream);
+            stream.Position = 0;
+            return Bitmap.DecodeToWidth(stream, Math.Clamp((int)Math.Ceiling(picture.Width), 1, 1280), BitmapInterpolationMode.HighQuality);
+        }
+        catch { return null; }
+    }
+
+    private static void AddDecodedPicture(Canvas canvas, PptxPicture picture, Bitmap bitmap)
+    {
+        var image = new Image { Source = bitmap, Width = picture.Width, Height = picture.Height, Stretch = Stretch.Fill };
+        if (picture.Rotation != 0 || picture.FlipHorizontal || picture.FlipVertical)
+        {
+            var transforms = new TransformGroup();
+            if (picture.FlipHorizontal || picture.FlipVertical)
+                transforms.Children.Add(new ScaleTransform(picture.FlipHorizontal ? -1 : 1, picture.FlipVertical ? -1 : 1));
+            if (picture.Rotation != 0) transforms.Children.Add(new RotateTransform(picture.Rotation));
+            image.RenderTransform = transforms;
+            image.RenderTransformOrigin = RelativePoint.Center;
+        }
+        Canvas.SetLeft(image, picture.Left);
+        Canvas.SetTop(image, picture.Top);
+        canvas.Children.Add(image);
     }
 
     private Control CreateShape(PptxShape shape)
@@ -356,27 +459,6 @@ public sealed class PptxViewer : UserControl, IDisposable
             }
         }
         return text;
-    }
-
-    private Image? CreatePicture(PptxPicture picture)
-    {
-        if (_document is null) return null;
-        try
-        {
-            using var package = _document.SourceBytes is { } sourceBytes
-                ? new ZipArchive(new MemoryStream(sourceBytes, writable: false), ZipArchiveMode.Read)
-                : ZipFile.OpenRead(_document.SourcePath ?? throw new InvalidOperationException("The presentation source is unavailable."));
-            var entry = package.GetEntry(picture.PackagePath);
-            if (entry is null) return null;
-            using var compressed = entry.Open();
-            using var stream = new MemoryStream((int)Math.Min(entry.Length, int.MaxValue));
-            compressed.CopyTo(stream);
-            stream.Position = 0;
-            var bitmap = Bitmap.DecodeToWidth(stream, Math.Clamp((int)Math.Ceiling(picture.Width), 1, 1280), BitmapInterpolationMode.HighQuality);
-            _renderingBitmaps?.Add(bitmap);
-            return new Image { Source = bitmap, Stretch = Stretch.Fill };
-        }
-        catch (Exception) { return null; } // SVG/WMF or a damaged image must not fail the document.
     }
 
     private static Line CreateLine(PptxLine line) => new()
@@ -440,12 +522,66 @@ public sealed class PptxViewer : UserControl, IDisposable
     private void OnPointerWheelChanged(object? sender, PointerWheelEventArgs e)
     {
         if (!e.KeyModifiers.HasFlag(KeyModifiers.Control)) return;
-        _zoom = Math.Clamp(_zoom * (e.Delta.Y > 0 ? 1.1 : 1 / 1.1), .5, 2.5);
+        ApplyZoom(_zoom * (e.Delta.Y > 0 ? 1.1 : 1 / 1.1));
+        e.Handled = true;
+    }
+
+    private void OnPointerPressed(object? sender, PointerEventArgs e)
+    {
+        if (e.Pointer.Type != PointerType.Touch) return;
+        _touchPoints[e.Pointer.Id] = e.GetPosition(this);
+        e.Pointer.Capture(this);
+        if (_touchPoints.Count == 2)
+        {
+            _pinchStartDistance = TouchDistance();
+            _pinchStartZoom = _zoom;
+            e.PreventGestureRecognition();
+            e.Handled = true;
+        }
+    }
+
+    private void OnPointerMoved(object? sender, PointerEventArgs e)
+    {
+        if (e.Pointer.Type != PointerType.Touch || !_touchPoints.ContainsKey(e.Pointer.Id)) return;
+        _touchPoints[e.Pointer.Id] = e.GetPosition(this);
+        if (_touchPoints.Count == 2 && _pinchStartDistance > 1)
+        {
+            ApplyZoom(_pinchStartZoom * TouchDistance() / _pinchStartDistance);
+            e.PreventGestureRecognition();
+            e.Handled = true;
+        }
+    }
+
+    private void OnPointerReleased(object? sender, PointerEventArgs e)
+    {
+        if (e.Pointer.Type != PointerType.Touch) return;
+        _touchPoints.Remove(e.Pointer.Id);
+        e.Pointer.Capture(null);
+        if (_touchPoints.Count < 2) _pinchStartDistance = 0;
+    }
+
+    private void OnPointerCaptureLost(object? sender, PointerCaptureLostEventArgs e)
+    {
+        _touchPoints.Clear();
+        _pinchStartDistance = 0;
+    }
+
+    private double TouchDistance()
+    {
+        if (_touchPoints.Count != 2) return 0;
+        var points = _touchPoints.Values.ToArray();
+        var dx = points[0].X - points[1].X;
+        var dy = points[0].Y - points[1].Y;
+        return Math.Sqrt(dx * dx + dy * dy);
+    }
+
+    private void ApplyZoom(double value)
+    {
+        _zoom = Math.Clamp(value, .5, 2.5);
         _zoomTransform.ScaleX = _zoom;
         _zoomTransform.ScaleY = _zoom;
         _scrollViewer.Offset = new Vector(0, _scrollViewer.Offset.Y);
         UpdateVirtualizedSlides();
-        e.Handled = true;
     }
 
     private void ShowError(Exception error)
@@ -456,6 +592,7 @@ public sealed class PptxViewer : UserControl, IDisposable
 
     private void ClearVisuals()
     {
+        _pendingSlides.Clear();
         foreach (var index in _slideHosts.Keys.ToArray()) ReleaseSlide(index);
         _ownedBitmaps.Clear();
         _slideHosts.Clear();
@@ -495,5 +632,6 @@ public sealed class PptxViewer : UserControl, IDisposable
     {
         public Border Slot { get; } = slot;
         public Canvas? Canvas { get; set; }
+        public bool Materializing { get; set; }
     }
 }

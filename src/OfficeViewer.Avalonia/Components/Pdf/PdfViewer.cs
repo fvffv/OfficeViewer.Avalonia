@@ -34,12 +34,16 @@ public sealed class PdfViewer : UserControl, IDisposable
     private readonly ScaleTransform _zoomTransform = new();
     private readonly Dictionary<int, PageHost> _pageHosts = [];
     private readonly Dictionary<int, List<IDisposable>> _ownedBitmaps = [];
+    private readonly HashSet<int> _pendingPages = [];
+    private readonly Dictionary<int, Point> _touchPoints = [];
     private PdfDocumentModel? _document;
     private List<IDisposable>? _renderingBitmaps;
     private CancellationTokenSource? _loadCancellation;
     private Task? _documentLoadTask;
     private long _generation;
     private double _zoom = 1;
+    private double _pinchStartDistance;
+    private double _pinchStartZoom;
     private bool _settingDocument;
     private bool _disposed;
 
@@ -91,6 +95,10 @@ public sealed class PdfViewer : UserControl, IDisposable
         };
         _scrollViewer.ScrollChanged += OnScrollChanged;
         AddHandler(InputElement.PointerWheelChangedEvent, OnPointerWheelChanged, RoutingStrategies.Tunnel);
+        AddHandler(InputElement.PointerPressedEvent, OnPointerPressed, RoutingStrategies.Tunnel);
+        AddHandler(InputElement.PointerMovedEvent, OnPointerMoved, RoutingStrategies.Tunnel);
+        AddHandler(InputElement.PointerReleasedEvent, OnPointerReleased, RoutingStrategies.Tunnel);
+        AddHandler(InputElement.PointerCaptureLostEvent, OnPointerCaptureLost, RoutingStrategies.Tunnel);
         Content = _scrollViewer;
     }
 
@@ -237,9 +245,19 @@ public sealed class PdfViewer : UserControl, IDisposable
         var lastKept = Math.Min(_document.PageCount - 1, lastVisible + 2);
         foreach (var index in _pageHosts.Keys.ToArray())
         {
-            if (index >= firstKept && index <= lastKept) MaterializePage(index);
+            if (index >= firstKept && index <= lastKept) ScheduleMaterializePage(index);
             else ReleasePage(index);
         }
+    }
+
+    private void ScheduleMaterializePage(int index)
+    {
+        if (!_pageHosts.TryGetValue(index, out var host) || host.Canvas is not null || !_pendingPages.Add(index)) return;
+        Dispatcher.UIThread.Post(() =>
+        {
+            _pendingPages.Remove(index);
+            MaterializePage(index);
+        }, DispatcherPriority.Background);
     }
 
     private int FindPageAt(double position)
@@ -493,6 +511,7 @@ public sealed class PdfViewer : UserControl, IDisposable
 
     private void ReleasePage(int index)
     {
+        _pendingPages.Remove(index);
         if (!_pageHosts.TryGetValue(index, out var host) || host.Canvas is null) return;
         host.Slot.Child = null;
         host.Canvas = null;
@@ -503,12 +522,66 @@ public sealed class PdfViewer : UserControl, IDisposable
     private void OnPointerWheelChanged(object? sender, PointerWheelEventArgs e)
     {
         if (!e.KeyModifiers.HasFlag(KeyModifiers.Control)) return;
-        _zoom = Math.Clamp(_zoom * (e.Delta.Y > 0 ? 1.1 : 1 / 1.1), .5, 2.5);
+        ApplyZoom(_zoom * (e.Delta.Y > 0 ? 1.1 : 1 / 1.1));
+        e.Handled = true;
+    }
+
+    private void OnPointerPressed(object? sender, PointerEventArgs e)
+    {
+        if (e.Pointer.Type != PointerType.Touch) return;
+        _touchPoints[e.Pointer.Id] = e.GetPosition(this);
+        e.Pointer.Capture(this);
+        if (_touchPoints.Count == 2)
+        {
+            _pinchStartDistance = TouchDistance();
+            _pinchStartZoom = _zoom;
+            e.PreventGestureRecognition();
+            e.Handled = true;
+        }
+    }
+
+    private void OnPointerMoved(object? sender, PointerEventArgs e)
+    {
+        if (e.Pointer.Type != PointerType.Touch || !_touchPoints.ContainsKey(e.Pointer.Id)) return;
+        _touchPoints[e.Pointer.Id] = e.GetPosition(this);
+        if (_touchPoints.Count == 2 && _pinchStartDistance > 1)
+        {
+            ApplyZoom(_pinchStartZoom * TouchDistance() / _pinchStartDistance);
+            e.PreventGestureRecognition();
+            e.Handled = true;
+        }
+    }
+
+    private void OnPointerReleased(object? sender, PointerEventArgs e)
+    {
+        if (e.Pointer.Type != PointerType.Touch) return;
+        _touchPoints.Remove(e.Pointer.Id);
+        e.Pointer.Capture(null);
+        if (_touchPoints.Count < 2) _pinchStartDistance = 0;
+    }
+
+    private void OnPointerCaptureLost(object? sender, PointerCaptureLostEventArgs e)
+    {
+        _touchPoints.Clear();
+        _pinchStartDistance = 0;
+    }
+
+    private double TouchDistance()
+    {
+        if (_touchPoints.Count != 2) return 0;
+        var points = _touchPoints.Values.ToArray();
+        var dx = points[0].X - points[1].X;
+        var dy = points[0].Y - points[1].Y;
+        return Math.Sqrt(dx * dx + dy * dy);
+    }
+
+    private void ApplyZoom(double value)
+    {
+        _zoom = Math.Clamp(value, .5, 2.5);
         _zoomTransform.ScaleX = _zoom;
         _zoomTransform.ScaleY = _zoom;
         _scrollViewer.Offset = new Vector(0, _scrollViewer.Offset.Y);
         UpdateVirtualizedPages();
-        e.Handled = true;
     }
 
     private void ShowError(Exception error)
@@ -526,6 +599,7 @@ public sealed class PdfViewer : UserControl, IDisposable
 
     private void ClearVisuals()
     {
+        _pendingPages.Clear();
         foreach (var index in _pageHosts.Keys.ToArray()) ReleasePage(index);
         _ownedBitmaps.Clear();
         _pageHosts.Clear();

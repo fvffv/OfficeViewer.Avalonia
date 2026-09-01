@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.IO.Compression;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using Avalonia;
@@ -23,7 +24,10 @@ public sealed class XlsxViewer : UserControl, IDisposable
 {
     private readonly ScrollViewer _scrollViewer;
     private readonly Border _sheetHost = new();
+    private readonly LayoutTransformControl _zoomHost;
+    private readonly ScaleTransform _zoomTransform = new();
     private readonly List<IDisposable> _ownedImages = [];
+    private readonly Dictionary<int, Point> _touchPoints = [];
     private XlsxWorkbookModel? _workbook;
     private CancellationTokenSource? _loadCancellation;
     private Task? _documentLoadTask;
@@ -31,6 +35,9 @@ public sealed class XlsxViewer : UserControl, IDisposable
     private int _activeSheetIndex = -1;
     private bool _settingDocument;
     private bool _disposed;
+    private double _zoom = 1;
+    private double _pinchStartDistance;
+    private double _pinchStartZoom;
 
     /// <summary>Gets the number of worksheets in the successfully loaded workbook.</summary>
     public static readonly StyledProperty<int> SheetCountProperty =
@@ -70,14 +77,27 @@ public sealed class XlsxViewer : UserControl, IDisposable
 
     public XlsxViewer()
     {
+        _zoomHost = new LayoutTransformControl
+        {
+            Child = _sheetHost,
+            LayoutTransform = _zoomTransform,
+            HorizontalAlignment = HorizontalAlignment.Center,
+            VerticalAlignment = VerticalAlignment.Top
+        };
         _scrollViewer = new ScrollViewer
         {
-            Content = _sheetHost,
+            Content = _zoomHost,
+            HorizontalContentAlignment = HorizontalAlignment.Center,
+            VerticalContentAlignment = VerticalAlignment.Top,
             HorizontalScrollBarVisibility = ScrollBarVisibility.Auto,
             VerticalScrollBarVisibility = ScrollBarVisibility.Auto
         };
         Content = _scrollViewer; // no viewer background: hosts own the surrounding surface
         AddHandler(InputElement.PointerWheelChangedEvent, OnPointerWheelChanged, RoutingStrategies.Tunnel);
+        AddHandler(InputElement.PointerPressedEvent, OnPointerPressed, RoutingStrategies.Tunnel);
+        AddHandler(InputElement.PointerMovedEvent, OnPointerMoved, RoutingStrategies.Tunnel);
+        AddHandler(InputElement.PointerReleasedEvent, OnPointerReleased, RoutingStrategies.Tunnel);
+        AddHandler(InputElement.PointerCaptureLostEvent, OnPointerCaptureLost, RoutingStrategies.Tunnel);
     }
 
     public async Task LoadAsync(string path, CancellationToken cancellationToken = default)
@@ -347,9 +367,65 @@ public sealed class XlsxViewer : UserControl, IDisposable
     private void OnPointerWheelChanged(object? sender, PointerWheelEventArgs e)
     {
         if (!e.KeyModifiers.HasFlag(KeyModifiers.Control)) return;
-        // Preserve normal scrolling; workbook zoom belongs to the host so it can be
-        // shared with DOCX/PPTX instead of keeping independent visual scale state.
+        ApplyZoom(_zoom * (e.Delta.Y > 0 ? 1.1 : 1 / 1.1));
         e.Handled = true;
+    }
+
+    private void OnPointerPressed(object? sender, PointerEventArgs e)
+    {
+        if (e.Pointer.Type != PointerType.Touch) return;
+        _touchPoints[e.Pointer.Id] = e.GetPosition(this);
+        e.Pointer.Capture(this);
+        if (_touchPoints.Count == 2)
+        {
+            _pinchStartDistance = TouchDistance();
+            _pinchStartZoom = _zoom;
+            e.PreventGestureRecognition();
+            e.Handled = true;
+        }
+    }
+
+    private void OnPointerMoved(object? sender, PointerEventArgs e)
+    {
+        if (e.Pointer.Type != PointerType.Touch || !_touchPoints.ContainsKey(e.Pointer.Id)) return;
+        _touchPoints[e.Pointer.Id] = e.GetPosition(this);
+        if (_touchPoints.Count == 2 && _pinchStartDistance > 1)
+        {
+            ApplyZoom(_pinchStartZoom * TouchDistance() / _pinchStartDistance);
+            e.PreventGestureRecognition();
+            e.Handled = true;
+        }
+    }
+
+    private void OnPointerReleased(object? sender, PointerEventArgs e)
+    {
+        if (e.Pointer.Type != PointerType.Touch) return;
+        _touchPoints.Remove(e.Pointer.Id);
+        e.Pointer.Capture(null);
+        if (_touchPoints.Count < 2) _pinchStartDistance = 0;
+    }
+
+    private void OnPointerCaptureLost(object? sender, PointerCaptureLostEventArgs e)
+    {
+        _touchPoints.Clear();
+        _pinchStartDistance = 0;
+    }
+
+    private double TouchDistance()
+    {
+        if (_touchPoints.Count != 2) return 0;
+        var points = _touchPoints.Values.ToArray();
+        var dx = points[0].X - points[1].X;
+        var dy = points[0].Y - points[1].Y;
+        return Math.Sqrt(dx * dx + dy * dy);
+    }
+
+    private void ApplyZoom(double value)
+    {
+        _zoom = Math.Clamp(value, .5, 2.5);
+        _zoomTransform.ScaleX = _zoom;
+        _zoomTransform.ScaleY = _zoom;
+        _scrollViewer.Offset = new Vector(0, _scrollViewer.Offset.Y);
     }
 
     private void ShowError(Exception error)

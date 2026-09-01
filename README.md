@@ -25,16 +25,18 @@ PDF 预览是当前项目独立实现的纯托管常见子集解析器：它不�
 
 每个控件均提供可绑定的 `byte[]? Document` 属性。给 `Document` 赋新的文件字节数组会自动开始读取；将其清除或设为 `null` 会自动取消旧读取任务，并释放当前文档的模型、图像与可视资源。PPTX/PDF 仅会实例化可视页及少量相邻页，避免长文档持续占用图片内存。控件仍保留 `LoadAsync` 作为非绑定场景的便捷方法。
 
+DOCX、PPTX 和 PDF 采用按视口异步物化：非可视页面仅保留轻量占位，滚动到附近时才创建文字、图形和图片控件，离开缓存范围后立即释放。
+
 ### 缩放
 
-**所有四个预览控件均支持按住 `Ctrl` 并滚动鼠标滚轮进行放大或缩小。** 不按 `Ctrl` 时，鼠标滚轮保持正常的上下滚动行为。
+**所有四个预览控件均支持按住 `Ctrl` 并滚动鼠标滚轮进行放大或缩小，也支持触摸屏双指捏合缩放。** 不按 `Ctrl` 时，鼠标滚轮保持正常的上下滚动行为。
 
 ### 安装
 
 从你的 NuGet 源安装：
 
 ```xml
-<PackageReference Include="OfficeViewer.Avalonia" Version="0.1.2" />
+<PackageReference Include="OfficeViewer.Avalonia" Version="0.1.5" />
 ```
 
 本仓库本地构建后的包目录如下，可在 Visual Studio、Rider 或 `NuGet.Config` 中添加为本地源：
@@ -171,18 +173,24 @@ The PDF viewer is this project's separate managed common-subset implementation. 
 | Excel / XLSX | ![XLSX preview](https://github.com/fvffv/OfficeViewer.Avalonia/blob/main/samples/xlsx.png?raw=true) |
 | PDF | ![PDF preview](https://github.com/fvffv/OfficeViewer.Avalonia/blob/main/samples/pdf.png?raw=true) |
 
+### AOT 演示程序 / AOT demo
+
+仓库 `samples/samplesAot.exe` 是基于当前控件源码构建的 Windows NativeAOT 演示程序。双击即可启动；也可以把 `.docx`、`.pptx`、`.xlsx` 或 `.pdf` 文件路径作为第一个命令行参数传入，启动时直接预览该文件。 / `samples/samplesAot.exe` is a Windows NativeAOT demo built from the current viewer source. Double-click it to start, or pass a `.docx`, `.pptx`, `.xlsx`, or `.pdf` path as the first command-line argument to open that document on startup.
+
 Every viewer exposes a bindable `byte[]? Document` property. Assign a new document byte array to start loading automatically; clear it or assign `null` to cancel stale loading and release the current document model, images, and visual resources. PPTX and PDF only materialize visible pages/slides plus a small adjacent buffer. `LoadAsync` remains available as a convenience method for non-binding scenarios.
+
+DOCX, PPTX, and PDF materialize pages asynchronously around the viewport: off-screen pages keep only lightweight placeholders, while text, shapes, and images are created when they approach the viewport and released after leaving the cache window.
 
 ### Zoom
 
-**All four viewers support zooming with `Ctrl` + mouse wheel.** Without `Ctrl`, the mouse wheel continues to scroll the preview normally.
+**All four viewers support zooming with `Ctrl` + mouse wheel and two-finger pinch gestures on touch screens.** Without `Ctrl`, the mouse wheel continues to scroll the preview normally.
 
 ### Install
 
 Install from your NuGet source:
 
 ```xml
-<PackageReference Include="OfficeViewer.Avalonia" Version="0.1.2" />
+<PackageReference Include="OfficeViewer.Avalonia" Version="0.1.5" />
 ```
 
 For a local build of this repository, add the following folder as a NuGet source:
